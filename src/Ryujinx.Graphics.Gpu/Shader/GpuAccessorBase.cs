@@ -1,6 +1,5 @@
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
-using Ryujinx.Graphics.Gpu.Engine.Threed;
 using Ryujinx.Graphics.Gpu.Image;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
@@ -16,8 +15,13 @@ namespace Ryujinx.Graphics.Gpu.Shader
         private readonly ResourceCounts _resourceCounts;
         private readonly int _stageIndex;
 
-        private readonly int _reservedConstantBuffers;
-        private readonly int _reservedStorageBuffers;
+        private int _reservedConstantBuffers;
+        private int _reservedStorageBuffers;
+        private int _reservedTextures;
+        private int _reservedImages;
+
+        private int _staticTexturesCount;
+        private int _staticImagesCount;
 
         /// <summary>
         /// Creates a new GPU accessor.
@@ -25,18 +29,29 @@ namespace Ryujinx.Graphics.Gpu.Shader
         /// <param name="context">GPU context</param>
         /// <param name="resourceCounts">Counter of GPU resources used by the shader</param>
         /// <param name="stageIndex">Index of the shader stage, 0 for compute</param>
-        /// <param name="tfEnabled">Indicates if the current graphics shader is used with transform feedback enabled</param>
-        public GpuAccessorBase(GpuContext context, ResourceCounts resourceCounts, int stageIndex, bool tfEnabled)
+        public GpuAccessorBase(GpuContext context, ResourceCounts resourceCounts, int stageIndex)
         {
             _context = context;
             _resourceCounts = resourceCounts;
             _stageIndex = stageIndex;
-
-            _reservedConstantBuffers = 1; // For the support buffer.
-            _reservedStorageBuffers = !context.Capabilities.SupportsTransformFeedback && tfEnabled ? 5 : 0;
         }
 
-        public int QueryBindingConstantBuffer(int index)
+        /// <summary>
+        /// Initializes counts for bindings that will be reserved for emulator use.
+        /// </summary>
+        /// <param name="tfEnabled">Indicates if the current graphics shader is used with transform feedback enabled</param>
+        /// <param name="vertexAsCompute">Indicates that the vertex shader will be emulated on a compute shader</param>
+        public void InitializeReservedCounts(bool tfEnabled, bool vertexAsCompute)
+        {
+            ResourceReservationCounts rrc = new(!_context.Capabilities.SupportsTransformFeedback && tfEnabled, vertexAsCompute);
+
+            _reservedConstantBuffers = rrc.ReservedConstantBuffers;
+            _reservedStorageBuffers = rrc.ReservedStorageBuffers;
+            _reservedTextures = rrc.ReservedTextures;
+            _reservedImages = rrc.ReservedImages;
+        }
+
+        public SetBindingPair CreateConstantBufferBinding(int index)
         {
             int binding;
 
@@ -49,10 +64,42 @@ namespace Ryujinx.Graphics.Gpu.Shader
                 binding = _resourceCounts.UniformBuffersCount++;
             }
 
-            return binding + _reservedConstantBuffers;
+            return new SetBindingPair(_context.Capabilities.UniformBufferSetIndex, binding + _reservedConstantBuffers);
         }
 
-        public int QueryBindingStorageBuffer(int index)
+        public SetBindingPair CreateImageBinding(int count, bool isBuffer)
+        {
+            int binding;
+
+            if (_context.Capabilities.Api == TargetApi.Vulkan)
+            {
+                if (count == 1)
+                {
+                    int index = _staticImagesCount++;
+
+                    if (isBuffer)
+                    {
+                        index += (int)_context.Capabilities.MaximumImagesPerStage;
+                    }
+
+                    binding = GetBindingFromIndex(index, _context.Capabilities.MaximumImagesPerStage * 2, "Image");
+                }
+                else
+                {
+                    binding = (int)GetDynamicBaseIndexDual(_context.Capabilities.MaximumImagesPerStage) + _resourceCounts.ImagesCount++;
+                }
+            }
+            else
+            {
+                binding = _resourceCounts.ImagesCount;
+
+                _resourceCounts.ImagesCount += count;
+            }
+
+            return new SetBindingPair(_context.Capabilities.ImageSetIndex, binding + _reservedImages);
+        }
+
+        public SetBindingPair CreateStorageBufferBinding(int index)
         {
             int binding;
 
@@ -65,41 +112,39 @@ namespace Ryujinx.Graphics.Gpu.Shader
                 binding = _resourceCounts.StorageBuffersCount++;
             }
 
-            return binding + _reservedStorageBuffers;
+            return new SetBindingPair(_context.Capabilities.StorageBufferSetIndex, binding + _reservedStorageBuffers);
         }
 
-        public int QueryBindingTexture(int index, bool isBuffer)
+        public SetBindingPair CreateTextureBinding(int count, bool isBuffer)
         {
+            int binding;
+
             if (_context.Capabilities.Api == TargetApi.Vulkan)
             {
-                if (isBuffer)
+                if (count == 1)
                 {
-                    index += (int)_context.Capabilities.MaximumTexturesPerStage;
-                }
+                    int index = _staticTexturesCount++;
 
-                return GetBindingFromIndex(index, _context.Capabilities.MaximumTexturesPerStage * 2, "Texture");
+                    if (isBuffer)
+                    {
+                        index += (int)_context.Capabilities.MaximumTexturesPerStage;
+                    }
+
+                    binding = GetBindingFromIndex(index, _context.Capabilities.MaximumTexturesPerStage * 2, "Texture");
+                }
+                else
+                {
+                    binding = (int)GetDynamicBaseIndexDual(_context.Capabilities.MaximumTexturesPerStage) + _resourceCounts.TexturesCount++;
+                }
             }
             else
             {
-                return _resourceCounts.TexturesCount++;
-            }
-        }
+                binding = _resourceCounts.TexturesCount;
 
-        public int QueryBindingImage(int index, bool isBuffer)
-        {
-            if (_context.Capabilities.Api == TargetApi.Vulkan)
-            {
-                if (isBuffer)
-                {
-                    index += (int)_context.Capabilities.MaximumImagesPerStage;
-                }
+                _resourceCounts.TexturesCount += count;
+            }
 
-                return GetBindingFromIndex(index, _context.Capabilities.MaximumImagesPerStage * 2, "Image");
-            }
-            else
-            {
-                return _resourceCounts.ImagesCount++;
-            }
+            return new SetBindingPair(_context.Capabilities.TextureSetIndex, binding + _reservedTextures);
         }
 
         private int GetBindingFromIndex(int index, uint maxPerStage, string resourceName)
@@ -128,6 +173,26 @@ namespace Ryujinx.Graphics.Gpu.Shader
             };
         }
 
+        private static uint GetDynamicBaseIndexDual(uint maxPerStage)
+        {
+            return GetDynamicBaseIndex(maxPerStage) * 2;
+        }
+
+        private static uint GetDynamicBaseIndex(uint maxPerStage)
+        {
+            return maxPerStage * Constants.ShaderStages;
+        }
+
+        public int CreateExtraSet()
+        {
+            if (_resourceCounts.SetsCount >= _context.Capabilities.MaximumExtraSets)
+            {
+                return -1;
+            }
+
+            return _context.Capabilities.ExtraSetBaseIndex + _resourceCounts.SetsCount++;
+        }
+
         public int QueryHostGatherBiasPrecision() => _context.Capabilities.GatherBiasPrecision;
 
         public bool QueryHostReducedPrecision() => _context.Capabilities.ReduceShaderPrecision;
@@ -137,6 +202,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
         public bool QueryHostHasVectorIndexingBug() => _context.Capabilities.HasVectorIndexingBug;
 
         public int QueryHostStorageBufferOffsetAlignment() => _context.Capabilities.StorageBufferOffsetAlignment;
+
+        public int QueryHostSubgroupSize() => _context.Capabilities.ShaderSubgroupSize;
 
         public bool QueryHostSupportsBgraFormat() => _context.Capabilities.SupportsBgraFormat;
 
@@ -154,6 +221,10 @@ namespace Ryujinx.Graphics.Gpu.Shader
 
         public bool QueryHostSupportsNonConstantTextureOffset() => _context.Capabilities.SupportsNonConstantTextureOffset;
 
+        public bool QueryHostSupportsScaledVertexFormats() => _context.Capabilities.SupportsScaledVertexFormats;
+
+        public bool QueryHostSupportsSeparateSampler() => _context.Capabilities.SupportsSeparateSampler;
+
         public bool QueryHostSupportsShaderBallot() => _context.Capabilities.SupportsShaderBallot;
 
         public bool QueryHostSupportsShaderBarrierDivergence() => _context.Capabilities.SupportsShaderBarrierDivergence;
@@ -161,6 +232,8 @@ namespace Ryujinx.Graphics.Gpu.Shader
         public bool QueryHostSupportsShaderFloat64() => _context.Capabilities.SupportsShaderFloat64;
 
         public bool QueryHostSupportsSnormBufferTextureFormat() => _context.Capabilities.SupportsSnormBufferTextureFormat;
+
+        public bool QueryHostSupportsTextureGatherOffsets() => _context.Capabilities.SupportsTextureGatherOffsets;
 
         public bool QueryHostSupportsTextureShadowLod() => _context.Capabilities.SupportsTextureShadowLod;
 
@@ -230,34 +303,6 @@ namespace Ryujinx.Graphics.Gpu.Shader
                 Format.R11G11B10Float    => TextureFormat.R11G11B10Float,
                 _                        => TextureFormat.Unknown,
 #pragma warning restore IDE0055
-            };
-        }
-
-        /// <summary>
-        /// Converts the Maxwell primitive topology to the shader translator topology.
-        /// </summary>
-        /// <param name="topology">Maxwell primitive topology</param>
-        /// <param name="tessellationMode">Maxwell tessellation mode</param>
-        /// <returns>Shader translator topology</returns>
-        protected static InputTopology ConvertToInputTopology(PrimitiveTopology topology, TessMode tessellationMode)
-        {
-            return topology switch
-            {
-                PrimitiveTopology.Points => InputTopology.Points,
-                PrimitiveTopology.Lines or
-                PrimitiveTopology.LineLoop or
-                PrimitiveTopology.LineStrip => InputTopology.Lines,
-                PrimitiveTopology.LinesAdjacency or
-                PrimitiveTopology.LineStripAdjacency => InputTopology.LinesAdjacency,
-                PrimitiveTopology.Triangles or
-                PrimitiveTopology.TriangleStrip or
-                PrimitiveTopology.TriangleFan => InputTopology.Triangles,
-                PrimitiveTopology.TrianglesAdjacency or
-                PrimitiveTopology.TriangleStripAdjacency => InputTopology.TrianglesAdjacency,
-                PrimitiveTopology.Patches => tessellationMode.UnpackPatchType() == TessPatchType.Isolines
-                    ? InputTopology.Lines
-                    : InputTopology.Triangles,
-                _ => InputTopology.Points,
             };
         }
     }

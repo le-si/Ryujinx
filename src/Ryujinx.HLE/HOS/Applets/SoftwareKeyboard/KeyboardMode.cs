@@ -1,4 +1,4 @@
-﻿namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
+namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
 {
     /// <summary>
     /// Identifies the variant of keyboard displayed on screen.
@@ -11,9 +11,9 @@
         Default = 0,
 
         /// <summary>
-        /// Only numbers allowed.
+        /// Only 0-9 or '.' allowed.
         /// </summary>
-        NumbersOnly = 1,
+        Numeric = 1,
 
         /// <summary>
         /// Only ASCII characters allowed.

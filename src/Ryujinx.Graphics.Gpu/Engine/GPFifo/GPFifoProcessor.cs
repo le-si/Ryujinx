@@ -1,9 +1,10 @@
-﻿using Ryujinx.Graphics.Device;
+using Ryujinx.Graphics.Device;
 using Ryujinx.Graphics.Gpu.Engine.Compute;
 using Ryujinx.Graphics.Gpu.Engine.Dma;
 using Ryujinx.Graphics.Gpu.Engine.InlineToMemory;
 using Ryujinx.Graphics.Gpu.Engine.Threed;
 using Ryujinx.Graphics.Gpu.Engine.Twod;
+using Ryujinx.Graphics.Gpu.Image;
 using Ryujinx.Graphics.Gpu.Memory;
 using System;
 using System.Runtime.CompilerServices;
@@ -13,7 +14,7 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
     /// <summary>
     /// Represents a GPU General Purpose FIFO command processor.
     /// </summary>
-    class GPFifoProcessor
+    class GPFifoProcessor : IDisposable
     {
         private const int MacrosCount = 0x80;
         private const int MacroIndexMask = MacrosCount - 1;
@@ -27,6 +28,11 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         /// Channel memory manager.
         /// </summary>
         public MemoryManager MemoryManager => _channel.MemoryManager;
+
+        /// <summary>
+        /// Channel texture manager.
+        /// </summary>
+        public TextureManager TextureManager => _channel.TextureManager;
 
         /// <summary>
         /// 3D Engine.
@@ -326,6 +332,20 @@ namespace Ryujinx.Graphics.Gpu.Engine.GPFifo
         public void PerformDeferredDraws()
         {
             _3dClass.PerformDeferredDraws();
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _3dClass.Dispose();
+            }
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
     }
 }

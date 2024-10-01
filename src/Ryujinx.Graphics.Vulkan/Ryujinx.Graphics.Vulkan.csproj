@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net7.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -15,6 +15,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Effects\Textures\SmaaAreaTexture.bin" />
     <EmbeddedResource Include="Effects\Textures\SmaaSearchTexture.bin" />
+    <EmbeddedResource Include="Effects\Shaders\AreaScaling.spv" />
     <EmbeddedResource Include="Effects\Shaders\FsrScaling.spv" />
     <EmbeddedResource Include="Effects\Shaders\FsrSharpening.spv" />
     <EmbeddedResource Include="Effects\Shaders\Fxaa.spv" />
@@ -42,6 +43,7 @@
     <EmbeddedResource Include="Shaders\SpirvBinaries\DepthBlitMsFragment.spv" />
     <EmbeddedResource Include="Shaders\SpirvBinaries\DepthDrawToMsFragment.spv" />
     <EmbeddedResource Include="Shaders\SpirvBinaries\DepthDrawToNonMsFragment.spv" />
+    <EmbeddedResource Include="Shaders\SpirvBinaries\DepthStencilClearFragment.spv" />
     <EmbeddedResource Include="Shaders\SpirvBinaries\StencilBlitFragment.spv" />
     <EmbeddedResource Include="Shaders\SpirvBinaries\StencilBlitMsFragment.spv" />
     <EmbeddedResource Include="Shaders\SpirvBinaries\StencilDrawToMsFragment.spv" />

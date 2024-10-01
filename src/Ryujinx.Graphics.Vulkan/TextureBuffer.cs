@@ -1,4 +1,4 @@
-﻿using Ryujinx.Common.Memory;
+using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.GAL;
 using Silk.NET.Vulkan;
 using System;
@@ -16,7 +16,6 @@ namespace Ryujinx.Graphics.Vulkan
         private int _offset;
         private int _size;
         private Auto<DisposableBufferView> _bufferView;
-        private Dictionary<Format, Auto<DisposableBufferView>> _selfManagedViews;
 
         private int _bufferCount;
 
@@ -80,31 +79,25 @@ namespace Ryujinx.Graphics.Vulkan
 
         private void ReleaseImpl()
         {
-            if (_selfManagedViews != null)
-            {
-                foreach (var bufferView in _selfManagedViews.Values)
-                {
-                    bufferView.Dispose();
-                }
-
-                _selfManagedViews = null;
-            }
-
             _bufferView?.Dispose();
             _bufferView = null;
         }
 
-        public void SetData(SpanOrArray<byte> data)
+        /// <inheritdoc/>
+        public void SetData(MemoryOwner<byte> data)
         {
-            _gd.SetBufferData(_bufferHandle, _offset, data);
+            _gd.SetBufferData(_bufferHandle, _offset, data.Span);
+            data.Dispose();
         }
 
-        public void SetData(SpanOrArray<byte> data, int layer, int level)
+        /// <inheritdoc/>
+        public void SetData(MemoryOwner<byte> data, int layer, int level)
         {
             throw new NotSupportedException();
         }
 
-        public void SetData(SpanOrArray<byte> data, int layer, int level, Rectangle<int> region)
+        /// <inheritdoc/>
+        public void SetData(MemoryOwner<byte> data, int layer, int level, Rectangle<int> region)
         {
             throw new NotSupportedException();
         }
@@ -127,34 +120,11 @@ namespace Ryujinx.Graphics.Vulkan
             ReleaseImpl();
         }
 
-        public BufferView GetBufferView(CommandBufferScoped cbs)
+        public BufferView GetBufferView(CommandBufferScoped cbs, bool write)
         {
             _bufferView ??= _gd.BufferManager.CreateView(_bufferHandle, VkFormat, _offset, _size, ReleaseImpl);
 
-            return _bufferView?.Get(cbs, _offset, _size).Value ?? default;
-        }
-
-        public BufferView GetBufferView(CommandBufferScoped cbs, Format format)
-        {
-            var vkFormat = FormatTable.GetFormat(format);
-            if (vkFormat == VkFormat)
-            {
-                return GetBufferView(cbs);
-            }
-
-            if (_selfManagedViews != null && _selfManagedViews.TryGetValue(format, out var bufferView))
-            {
-                return bufferView.Get(cbs, _offset, _size).Value;
-            }
-
-            bufferView = _gd.BufferManager.CreateView(_bufferHandle, vkFormat, _offset, _size, ReleaseImpl);
-
-            if (bufferView != null)
-            {
-                (_selfManagedViews ??= new Dictionary<Format, Auto<DisposableBufferView>>()).Add(format, bufferView);
-            }
-
-            return bufferView?.Get(cbs, _offset, _size).Value ?? default;
+            return _bufferView?.Get(cbs, _offset, _size, write).Value ?? default;
         }
     }
 }

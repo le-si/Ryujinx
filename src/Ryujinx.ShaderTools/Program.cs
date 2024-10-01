@@ -1,4 +1,4 @@
-﻿using CommandLine;
+using CommandLine;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
 using System;
@@ -11,16 +11,66 @@ namespace Ryujinx.ShaderTools
     {
         private class GpuAccessor : IGpuAccessor
         {
+            private const int DefaultArrayLength = 32;
+
             private readonly byte[] _data;
+
+            private int _texturesCount;
+            private int _imagesCount;
 
             public GpuAccessor(byte[] data)
             {
                 _data = data;
+                _texturesCount = 0;
+                _imagesCount = 0;
+            }
+
+            public SetBindingPair CreateConstantBufferBinding(int index)
+            {
+                return new SetBindingPair(0, index + 1);
+            }
+
+            public SetBindingPair CreateImageBinding(int count, bool isBuffer)
+            {
+                int binding = _imagesCount;
+
+                _imagesCount += count;
+
+                return new SetBindingPair(3, binding);
+            }
+
+            public SetBindingPair CreateStorageBufferBinding(int index)
+            {
+                return new SetBindingPair(1, index);
+            }
+
+            public SetBindingPair CreateTextureBinding(int count, bool isBuffer)
+            {
+                int binding = _texturesCount;
+
+                _texturesCount += count;
+
+                return new SetBindingPair(2, binding);
             }
 
             public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize)
             {
                 return MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_data)[(int)address..]);
+            }
+
+            public int QuerySamplerArrayLengthFromPool()
+            {
+                return DefaultArrayLength;
+            }
+
+            public int QueryTextureArrayLengthFromBuffer(int slot)
+            {
+                return DefaultArrayLength;
+            }
+
+            public int QueryTextureArrayLengthFromPool()
+            {
+                return DefaultArrayLength;
             }
         }
 
@@ -28,6 +78,12 @@ namespace Ryujinx.ShaderTools
         {
             [Option("compute", Required = false, Default = false, HelpText = "Indicate that the shader is a compute shader.")]
             public bool Compute { get; set; }
+
+            [Option("vertex-as-compute", Required = false, Default = false, HelpText = "Indicate that the shader is a vertex shader and should be converted to compute.")]
+            public bool VertexAsCompute { get; set; }
+
+            [Option("vertex-passthrough", Required = false, Default = false, HelpText = "Indicate that the shader is a vertex passthrough shader for compute output.")]
+            public bool VertexPassthrough { get; set; }
 
             [Option("target-language", Required = false, Default = TargetLanguage.Glsl, HelpText = "Indicate the target shader language to use.")]
             public TargetLanguage TargetLanguage { get; set; }
@@ -54,8 +110,18 @@ namespace Ryujinx.ShaderTools
             byte[] data = File.ReadAllBytes(options.InputPath);
 
             TranslationOptions translationOptions = new(options.TargetLanguage, options.TargetApi, flags);
+            TranslatorContext translatorContext = Translator.CreateContext(0, new GpuAccessor(data), translationOptions);
 
-            ShaderProgram program = Translator.CreateContext(0, new GpuAccessor(data), translationOptions).Translate();
+            ShaderProgram program;
+
+            if (options.VertexPassthrough)
+            {
+                program = translatorContext.GenerateVertexPassthroughForCompute();
+            }
+            else
+            {
+                program = translatorContext.Translate(options.VertexAsCompute);
+            }
 
             if (options.OutputPath == null)
             {

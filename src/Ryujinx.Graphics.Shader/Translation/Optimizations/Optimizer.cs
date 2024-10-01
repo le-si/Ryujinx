@@ -7,40 +7,48 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
 {
     static class Optimizer
     {
-        public static void RunPass(HelperFunctionManager hfm, BasicBlock[] blocks, ShaderConfig config)
+        public static void RunPass(TransformContext context)
         {
-            RunOptimizationPasses(blocks, config);
+            RunOptimizationPasses(context.Blocks, context.ResourceManager);
 
             // TODO: Some of those are not optimizations and shouldn't be here.
 
-            GlobalToStorage.RunPass(hfm, blocks, config);
+            GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);
 
-            bool hostSupportsShaderFloat64 = config.GpuAccessor.QueryHostSupportsShaderFloat64();
+            bool hostSupportsShaderFloat64 = context.GpuAccessor.QueryHostSupportsShaderFloat64();
 
             // Those passes are looking for specific patterns and only needs to run once.
-            for (int blkIndex = 0; blkIndex < blocks.Length; blkIndex++)
+            for (int blkIndex = 0; blkIndex < context.Blocks.Length; blkIndex++)
             {
-                BindlessToIndexed.RunPass(blocks[blkIndex], config);
-                BindlessElimination.RunPass(blocks[blkIndex], config);
+                if (context.TargetApi == TargetApi.OpenGL)
+                {
+                    BindlessToArray.RunPassOgl(context.Blocks[blkIndex], context.ResourceManager);
+                }
+                else
+                {
+                    BindlessToArray.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
+                }
+
+                BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
 
                 // FragmentCoord only exists on fragment shaders, so we don't need to check other stages.
-                if (config.Stage == ShaderStage.Fragment)
+                if (context.Stage == ShaderStage.Fragment)
                 {
-                    EliminateMultiplyByFragmentCoordW(blocks[blkIndex]);
+                    EliminateMultiplyByFragmentCoordW(context.Blocks[blkIndex]);
                 }
 
                 // If the host does not support double operations, we need to turn them into float operations.
                 if (!hostSupportsShaderFloat64)
                 {
-                    DoubleToFloat.RunPass(hfm, blocks[blkIndex]);
+                    DoubleToFloat.RunPass(context.Hfm, context.Blocks[blkIndex]);
                 }
             }
 
             // Run optimizations one last time to remove any code that is now optimizable after above passes.
-            RunOptimizationPasses(blocks, config);
+            RunOptimizationPasses(context.Blocks, context.ResourceManager);
         }
 
-        private static void RunOptimizationPasses(BasicBlock[] blocks, ShaderConfig config)
+        private static void RunOptimizationPasses(BasicBlock[] blocks, ResourceManager resourceManager)
         {
             bool modified;
 
@@ -79,7 +87,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                             continue;
                         }
 
-                        ConstantFolding.RunPass(config, operation);
+                        ConstantFolding.RunPass(resourceManager, operation);
                         Simplification.RunPass(operation);
 
                         if (DestIsLocalVar(operation))
@@ -144,18 +152,14 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         {
             // If all phi sources are the same, we can propagate it and remove the phi.
 
-            Operand firstSrc = phi.GetSource(0);
-
-            for (int index = 1; index < phi.SourcesCount; index++)
+            if (!Utils.AreAllSourcesTheSameOperand(phi))
             {
-                if (!IsSameOperand(firstSrc, phi.GetSource(index)))
-                {
-                    return false;
-                }
+                return false;
             }
 
             // All sources are equal, we can propagate the value.
 
+            Operand firstSrc = phi.GetSource(0);
             Operand dest = phi.Dest;
 
             INode[] uses = dest.UseOps.ToArray();
@@ -172,17 +176,6 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             }
 
             return true;
-        }
-
-        private static bool IsSameOperand(Operand x, Operand y)
-        {
-            if (x.Type != y.Type || x.Value != y.Value)
-            {
-                return false;
-            }
-
-            // TODO: Handle Load operations with the same storage and the same constant parameters.
-            return x.Type == OperandType.Constant || x.Type == OperandType.ConstantBuffer;
         }
 
         private static bool PropagatePack(Operation packOp)
@@ -322,7 +315,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Operand lhs = operation.GetSource(0);
             Operand rhs = operation.GetSource(1);
 
-            // Check LHS of the the main multiplication operation. We expect an input being multiplied by gl_FragCoord.w.
+            // Check LHS of the main multiplication operation. We expect an input being multiplied by gl_FragCoord.w.
             if (lhs.AsgOp is not Operation attrMulOp || attrMulOp.Inst != (Instruction.FP32 | Instruction.Multiply))
             {
                 return;

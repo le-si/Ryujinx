@@ -1,11 +1,10 @@
-﻿using Ryujinx.Common;
+using Ryujinx.Common;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
 using Silk.NET.Vulkan;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Numerics;
 using CompareOp = Ryujinx.Graphics.GAL.CompareOp;
 using Format = Ryujinx.Graphics.GAL.Format;
@@ -27,6 +26,7 @@ namespace Ryujinx.Graphics.Vulkan
     class HelperShader : IDisposable
     {
         private const int UniformBufferAlignment = 256;
+        private const int ConvertElementsPerWorkgroup = 32 * 100; // Work group size of 32 times 100 elements.
         private const string ShaderBinariesPath = "Ryujinx.Graphics.Vulkan/Shaders/SpirvBinaries";
 
         private readonly PipelineHelperShader _pipeline;
@@ -38,6 +38,7 @@ namespace Ryujinx.Graphics.Vulkan
         private readonly IProgram _programColorClearF;
         private readonly IProgram _programColorClearSI;
         private readonly IProgram _programColorClearUI;
+        private readonly IProgram _programDepthStencilClear;
         private readonly IProgram _programStrideChange;
         private readonly IProgram _programConvertD32S8ToD24S8;
         private readonly IProgram _programConvertIndexBuffer;
@@ -105,10 +106,16 @@ namespace Ryujinx.Graphics.Vulkan
                 new ShaderSource(ReadSpirv("ColorClearUIFragment.spv"), ShaderStage.Fragment, TargetLanguage.Spirv),
             }, colorClearResourceLayout);
 
+            _programDepthStencilClear = gd.CreateProgramWithMinimalLayout(new[]
+            {
+                new ShaderSource(ReadSpirv("ColorClearVertex.spv"), ShaderStage.Vertex, TargetLanguage.Spirv),
+                new ShaderSource(ReadSpirv("DepthStencilClearFragment.spv"), ShaderStage.Fragment, TargetLanguage.Spirv),
+            }, colorClearResourceLayout);
+
             var strideChangeResourceLayout = new ResourceLayoutBuilder()
                 .Add(ResourceStages.Compute, ResourceType.UniformBuffer, 0)
                 .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 1)
-                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2).Build();
+                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2, true).Build();
 
             _programStrideChange = gd.CreateProgramWithMinimalLayout(new[]
             {
@@ -118,7 +125,7 @@ namespace Ryujinx.Graphics.Vulkan
             var colorCopyResourceLayout = new ResourceLayoutBuilder()
                 .Add(ResourceStages.Compute, ResourceType.UniformBuffer, 0)
                 .Add(ResourceStages.Compute, ResourceType.TextureAndSampler, 0)
-                .Add(ResourceStages.Compute, ResourceType.Image, 0).Build();
+                .Add(ResourceStages.Compute, ResourceType.Image, 0, true).Build();
 
             _programColorCopyShortening = gd.CreateProgramWithMinimalLayout(new[]
             {
@@ -148,7 +155,7 @@ namespace Ryujinx.Graphics.Vulkan
             var convertD32S8ToD24S8ResourceLayout = new ResourceLayoutBuilder()
                 .Add(ResourceStages.Compute, ResourceType.UniformBuffer, 0)
                 .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 1)
-                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2).Build();
+                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2, true).Build();
 
             _programConvertD32S8ToD24S8 = gd.CreateProgramWithMinimalLayout(new[]
             {
@@ -158,7 +165,7 @@ namespace Ryujinx.Graphics.Vulkan
             var convertIndexBufferResourceLayout = new ResourceLayoutBuilder()
                 .Add(ResourceStages.Compute, ResourceType.UniformBuffer, 0)
                 .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 1)
-                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2).Build();
+                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2, true).Build();
 
             _programConvertIndexBuffer = gd.CreateProgramWithMinimalLayout(new[]
             {
@@ -168,7 +175,7 @@ namespace Ryujinx.Graphics.Vulkan
             var convertIndirectDataResourceLayout = new ResourceLayoutBuilder()
                 .Add(ResourceStages.Compute, ResourceType.UniformBuffer, 0)
                 .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 1)
-                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2)
+                .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 2, true)
                 .Add(ResourceStages.Compute, ResourceType.StorageBuffer, 3).Build();
 
             _programConvertIndirectData = gd.CreateProgramWithMinimalLayout(new[]
@@ -249,17 +256,8 @@ namespace Ryujinx.Graphics.Vulkan
 
             using var cbs = gd.CommandBufferPool.Rent();
 
-            var dstFormat = dst.VkFormat;
-            var dstSamples = dst.Info.Samples;
-
             for (int l = 0; l < levels; l++)
             {
-                int srcWidth = Math.Max(1, src.Width >> l);
-                int srcHeight = Math.Max(1, src.Height >> l);
-
-                int dstWidth = Math.Max(1, dst.Width >> l);
-                int dstHeight = Math.Max(1, dst.Height >> l);
-
                 var mipSrcRegion = new Extents2D(
                     srcRegion.X1 >> l,
                     srcRegion.Y1 >> l,
@@ -283,11 +281,7 @@ namespace Ryujinx.Graphics.Vulkan
                             gd,
                             cbs,
                             srcView,
-                            dst.GetImageViewForAttachment(),
-                            dstWidth,
-                            dstHeight,
-                            dstSamples,
-                            dstFormat,
+                            dstView,
                             mipSrcRegion,
                             mipDstRegion);
                     }
@@ -297,12 +291,7 @@ namespace Ryujinx.Graphics.Vulkan
                             gd,
                             cbs,
                             srcView,
-                            dst.GetImageViewForAttachment(),
-                            dstWidth,
-                            dstHeight,
-                            dstSamples,
-                            dstFormat,
-                            false,
+                            dstView,
                             mipSrcRegion,
                             mipDstRegion,
                             linearFilter,
@@ -360,12 +349,7 @@ namespace Ryujinx.Graphics.Vulkan
                         gd,
                         cbs,
                         srcView,
-                        dstView.GetImageViewForAttachment(),
-                        dstView.Width,
-                        dstView.Height,
-                        dstView.Info.Samples,
-                        dstView.VkFormat,
-                        dstView.Info.Format.IsDepthOrStencil(),
+                        dstView,
                         extents,
                         extents,
                         false);
@@ -387,12 +371,7 @@ namespace Ryujinx.Graphics.Vulkan
             VulkanRenderer gd,
             CommandBufferScoped cbs,
             TextureView src,
-            Auto<DisposableImageView> dst,
-            int dstWidth,
-            int dstHeight,
-            int dstSamples,
-            VkFormat dstFormat,
-            bool dstIsDepthOrStencil,
+            TextureView dst,
             Extents2D srcRegion,
             Extents2D dstRegion,
             bool linearFilter,
@@ -423,11 +402,11 @@ namespace Ryujinx.Graphics.Vulkan
                 (region[2], region[3]) = (region[3], region[2]);
             }
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, RegionBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, RegionBufferSize);
 
-            gd.BufferManager.SetData<float>(bufferHandle, 0, region);
+            buffer.Holder.SetDataUnchecked<float>(buffer.Offset, region);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, new BufferRange(bufferHandle, 0, RegionBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, buffer.Range) });
 
             Span<Viewport> viewports = stackalloc Viewport[1];
 
@@ -446,9 +425,7 @@ namespace Ryujinx.Graphics.Vulkan
                 0f,
                 1f);
 
-            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[1];
-
-            scissors[0] = new Rectangle<int>(0, 0, dstWidth, dstHeight);
+            bool dstIsDepthOrStencil = dst.Info.Format.IsDepthOrStencil();
 
             if (dstIsDepthOrStencil)
             {
@@ -468,9 +445,12 @@ namespace Ryujinx.Graphics.Vulkan
                 _pipeline.SetProgram(_programColorBlit);
             }
 
-            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight, (uint)dstSamples, dstIsDepthOrStencil, dstFormat);
+            int dstWidth = dst.Width;
+            int dstHeight = dst.Height;
+
+            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight);
             _pipeline.SetRenderTargetColorMasks(new uint[] { 0xf });
-            _pipeline.SetScissors(scissors);
+            _pipeline.SetScissors(stackalloc Rectangle<int>[] { new Rectangle<int>(0, 0, dstWidth, dstHeight) });
 
             if (clearAlpha)
             {
@@ -487,19 +467,13 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             _pipeline.Finish(gd, cbs);
-
-            gd.BufferManager.Delete(bufferHandle);
         }
 
         private void BlitDepthStencil(
             VulkanRenderer gd,
             CommandBufferScoped cbs,
             TextureView src,
-            Auto<DisposableImageView> dst,
-            int dstWidth,
-            int dstHeight,
-            int dstSamples,
-            VkFormat dstFormat,
+            TextureView dst,
             Extents2D srcRegion,
             Extents2D dstRegion)
         {
@@ -524,11 +498,11 @@ namespace Ryujinx.Graphics.Vulkan
                 (region[2], region[3]) = (region[3], region[2]);
             }
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, RegionBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, RegionBufferSize);
 
-            gd.BufferManager.SetData<float>(bufferHandle, 0, region);
+            buffer.Holder.SetDataUnchecked<float>(buffer.Offset, region);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, new BufferRange(bufferHandle, 0, RegionBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, buffer.Range) });
 
             Span<Viewport> viewports = stackalloc Viewport[1];
 
@@ -547,12 +521,11 @@ namespace Ryujinx.Graphics.Vulkan
                 0f,
                 1f);
 
-            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[1];
+            int dstWidth = dst.Width;
+            int dstHeight = dst.Height;
 
-            scissors[0] = new Rectangle<int>(0, 0, dstWidth, dstHeight);
-
-            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight, (uint)dstSamples, true, dstFormat);
-            _pipeline.SetScissors(scissors);
+            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight);
+            _pipeline.SetScissors(stackalloc Rectangle<int>[] { new Rectangle<int>(0, 0, dstWidth, dstHeight) });
             _pipeline.SetViewports(viewports);
             _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
 
@@ -583,8 +556,6 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             _pipeline.Finish(gd, cbs);
-
-            gd.BufferManager.Delete(bufferHandle);
         }
 
         private static TextureView CreateDepthOrStencilView(TextureView depthStencilTexture, DepthStencilMode depthStencilMode)
@@ -639,7 +610,11 @@ namespace Ryujinx.Graphics.Vulkan
             }
         }
 
-        private static StencilTestDescriptor CreateStencilTestDescriptor(bool enabled)
+        private static StencilTestDescriptor CreateStencilTestDescriptor(
+            bool enabled,
+            int refValue = 0,
+            int compareMask = 0xff,
+            int writeMask = 0xff)
         {
             return new StencilTestDescriptor(
                 enabled,
@@ -647,26 +622,25 @@ namespace Ryujinx.Graphics.Vulkan
                 StencilOp.Replace,
                 StencilOp.Replace,
                 StencilOp.Replace,
-                0,
-                0xff,
-                0xff,
+                refValue,
+                compareMask,
+                writeMask,
                 CompareOp.Always,
                 StencilOp.Replace,
                 StencilOp.Replace,
                 StencilOp.Replace,
-                0,
-                0xff,
-                0xff);
+                refValue,
+                compareMask,
+                writeMask);
         }
 
         public void Clear(
             VulkanRenderer gd,
-            Auto<DisposableImageView> dst,
+            TextureView dst,
             ReadOnlySpan<float> clearColor,
             uint componentMask,
             int dstWidth,
             int dstHeight,
-            VkFormat dstFormat,
             ComponentType type,
             Rectangle<int> scissor)
         {
@@ -678,11 +652,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             _pipeline.SetCommandBuffer(cbs);
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, ClearColorBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ClearColorBufferSize);
 
-            gd.BufferManager.SetData(bufferHandle, 0, clearColor);
+            buffer.Holder.SetDataUnchecked(buffer.Offset, clearColor);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, new BufferRange(bufferHandle, 0, ClearColorBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, buffer.Range) });
 
             Span<Viewport> viewports = stackalloc Viewport[1];
 
@@ -694,10 +668,6 @@ namespace Ryujinx.Graphics.Vulkan
                 ViewportSwizzle.PositiveW,
                 0f,
                 1f);
-
-            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[1];
-
-            scissors[0] = scissor;
 
             IProgram program;
 
@@ -715,15 +685,61 @@ namespace Ryujinx.Graphics.Vulkan
             }
 
             _pipeline.SetProgram(program);
-            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight, false, dstFormat);
+            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight);
             _pipeline.SetRenderTargetColorMasks(new[] { componentMask });
             _pipeline.SetViewports(viewports);
-            _pipeline.SetScissors(scissors);
+            _pipeline.SetScissors(stackalloc Rectangle<int>[] { scissor });
             _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
             _pipeline.Draw(4, 1, 0, 0);
             _pipeline.Finish();
+        }
 
-            gd.BufferManager.Delete(bufferHandle);
+        public void Clear(
+            VulkanRenderer gd,
+            TextureView dst,
+            float depthValue,
+            bool depthMask,
+            int stencilValue,
+            int stencilMask,
+            int dstWidth,
+            int dstHeight,
+            VkFormat dstFormat,
+            Rectangle<int> scissor)
+        {
+            const int ClearColorBufferSize = 16;
+
+            gd.FlushAllCommands();
+
+            using var cbs = gd.CommandBufferPool.Rent();
+
+            _pipeline.SetCommandBuffer(cbs);
+
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ClearColorBufferSize);
+
+            buffer.Holder.SetDataUnchecked<float>(buffer.Offset, stackalloc float[] { depthValue });
+
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(1, buffer.Range) });
+
+            Span<Viewport> viewports = stackalloc Viewport[1];
+
+            viewports[0] = new Viewport(
+                new Rectangle<float>(0, 0, dstWidth, dstHeight),
+                ViewportSwizzle.PositiveX,
+                ViewportSwizzle.PositiveY,
+                ViewportSwizzle.PositiveZ,
+                ViewportSwizzle.PositiveW,
+                0f,
+                1f);
+
+            _pipeline.SetProgram(_programDepthStencilClear);
+            _pipeline.SetRenderTarget(dst, (uint)dstWidth, (uint)dstHeight);
+            _pipeline.SetViewports(viewports);
+            _pipeline.SetScissors(stackalloc Rectangle<int>[] { scissor });
+            _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
+            _pipeline.SetDepthTest(new DepthTestDescriptor(true, depthMask, CompareOp.Always));
+            _pipeline.SetStencilTest(CreateStencilTestDescriptor(stencilMask != 0, stencilValue, 0xff, stencilMask));
+            _pipeline.Draw(4, 1, 0, 0);
+            _pipeline.Finish();
         }
 
         public void DrawTexture(
@@ -778,8 +794,6 @@ namespace Ryujinx.Graphics.Vulkan
                 0f,
                 1f);
 
-            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[1];
-
             pipeline.SetProgram(_programColorBlit);
             pipeline.SetViewports(viewports);
             pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
@@ -831,13 +845,13 @@ namespace Ryujinx.Graphics.Vulkan
                 shaderParams[2] = size;
                 shaderParams[3] = srcOffset;
 
-                var bufferHandle = gd.BufferManager.CreateWithHandle(gd, ParamsBufferSize);
+                using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ParamsBufferSize);
 
-                gd.BufferManager.SetData<int>(bufferHandle, 0, shaderParams);
+                buffer.Holder.SetDataUnchecked<int>(buffer.Offset, shaderParams);
 
                 _pipeline.SetCommandBuffer(cbs);
 
-                _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(bufferHandle, 0, ParamsBufferSize)) });
+                _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, buffer.Range) });
 
                 Span<Auto<DisposableBuffer>> sbRanges = new Auto<DisposableBuffer>[2];
 
@@ -847,9 +861,7 @@ namespace Ryujinx.Graphics.Vulkan
                 _pipeline.SetStorageBuffers(1, sbRanges);
 
                 _pipeline.SetProgram(_programStrideChange);
-                _pipeline.DispatchCompute(1, 1, 1);
-
-                gd.BufferManager.Delete(bufferHandle);
+                _pipeline.DispatchCompute(1 + elems / ConvertElementsPerWorkgroup, 1, 1);
 
                 _pipeline.Finish(gd, cbs);
             }
@@ -978,7 +990,7 @@ namespace Ryujinx.Graphics.Vulkan
         {
             const int ParamsBufferSize = 4;
 
-            Span<int> shaderParams = stackalloc int[sizeof(int)];
+            Span<int> shaderParams = stackalloc int[ParamsBufferSize / sizeof(int)];
 
             int srcBpp = src.Info.BytesPerPixel;
             int dstBpp = dst.Info.BytesPerPixel;
@@ -987,9 +999,9 @@ namespace Ryujinx.Graphics.Vulkan
 
             shaderParams[0] = BitOperations.Log2((uint)ratio);
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, ParamsBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ParamsBufferSize);
 
-            gd.BufferManager.SetData<int>(bufferHandle, 0, shaderParams);
+            buffer.Holder.SetDataUnchecked<int>(buffer.Offset, shaderParams);
 
             TextureView.InsertImageBarrier(
                 gd.Api,
@@ -1017,7 +1029,7 @@ namespace Ryujinx.Graphics.Vulkan
             var srcFormat = GetFormat(componentSize, srcBpp / componentSize);
             var dstFormat = GetFormat(componentSize, dstBpp / componentSize);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(bufferHandle, 0, ParamsBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, buffer.Range) });
 
             for (int l = 0; l < levels; l++)
             {
@@ -1027,7 +1039,7 @@ namespace Ryujinx.Graphics.Vulkan
                     var dstView = Create2DLayerView(dst, dstLayer + z, dstLevel + l);
 
                     _pipeline.SetTextureAndSamplerIdentitySwizzle(ShaderStage.Compute, 0, srcView, null);
-                    _pipeline.SetImage(0, dstView, dstFormat);
+                    _pipeline.SetImage(ShaderStage.Compute, 0, dstView.GetView(dstFormat));
 
                     int dispatchX = (Math.Min(srcView.Info.Width, dstView.Info.Width) + 31) / 32;
                     int dispatchY = (Math.Min(srcView.Info.Height, dstView.Info.Height) + 31) / 32;
@@ -1045,8 +1057,6 @@ namespace Ryujinx.Graphics.Vulkan
                     }
                 }
             }
-
-            gd.BufferManager.Delete(bufferHandle);
 
             _pipeline.Finish(gd, cbs);
 
@@ -1081,9 +1091,9 @@ namespace Ryujinx.Graphics.Vulkan
             (shaderParams[0], shaderParams[1]) = GetSampleCountXYLog2(samples);
             (shaderParams[2], shaderParams[3]) = GetSampleCountXYLog2((int)TextureStorage.ConvertToSampleCountFlags(gd.Capabilities.SupportedSampleCounts, (uint)samples));
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, ParamsBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ParamsBufferSize);
 
-            gd.BufferManager.SetData<int>(bufferHandle, 0, shaderParams);
+            buffer.Holder.SetDataUnchecked<int>(buffer.Offset, shaderParams);
 
             TextureView.InsertImageBarrier(
                 gd.Api,
@@ -1100,7 +1110,7 @@ namespace Ryujinx.Graphics.Vulkan
                 1);
 
             _pipeline.SetCommandBuffer(cbs);
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(bufferHandle, 0, ParamsBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, buffer.Range) });
 
             if (isDepthOrStencil)
             {
@@ -1119,11 +1129,7 @@ namespace Ryujinx.Graphics.Vulkan
                     0f,
                     1f);
 
-                Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[1];
-
-                scissors[0] = new Rectangle<int>(0, 0, dst.Width, dst.Height);
-
-                _pipeline.SetScissors(scissors);
+                _pipeline.SetScissors(stackalloc Rectangle<int>[] { new Rectangle<int>(0, 0, dst.Width, dst.Height) });
                 _pipeline.SetViewports(viewports);
                 _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
 
@@ -1132,12 +1138,7 @@ namespace Ryujinx.Graphics.Vulkan
                     var srcView = Create2DLayerView(src, srcLayer + z, 0);
                     var dstView = Create2DLayerView(dst, dstLayer + z, 0);
 
-                    _pipeline.SetRenderTarget(
-                        dstView.GetImageViewForAttachment(),
-                        (uint)dst.Width,
-                        (uint)dst.Height,
-                        true,
-                        dst.VkFormat);
+                    _pipeline.SetRenderTarget(dstView, (uint)dst.Width, (uint)dst.Height);
 
                     CopyMSDraw(srcView, aspectFlags, fromMS: true);
 
@@ -1167,7 +1168,7 @@ namespace Ryujinx.Graphics.Vulkan
                     var dstView = Create2DLayerView(dst, dstLayer + z, 0);
 
                     _pipeline.SetTextureAndSamplerIdentitySwizzle(ShaderStage.Compute, 0, srcView, null);
-                    _pipeline.SetImage(0, dstView, format);
+                    _pipeline.SetImage(ShaderStage.Compute, 0, dstView.GetView(format));
 
                     _pipeline.DispatchCompute(dispatchX, dispatchY, 1);
 
@@ -1182,8 +1183,6 @@ namespace Ryujinx.Graphics.Vulkan
                     }
                 }
             }
-
-            gd.BufferManager.Delete(bufferHandle);
 
             _pipeline.Finish(gd, cbs);
 
@@ -1218,9 +1217,9 @@ namespace Ryujinx.Graphics.Vulkan
             (shaderParams[0], shaderParams[1]) = GetSampleCountXYLog2(samples);
             (shaderParams[2], shaderParams[3]) = GetSampleCountXYLog2((int)TextureStorage.ConvertToSampleCountFlags(gd.Capabilities.SupportedSampleCounts, (uint)samples));
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, ParamsBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ParamsBufferSize);
 
-            gd.BufferManager.SetData<int>(bufferHandle, 0, shaderParams);
+            buffer.Holder.SetDataUnchecked<int>(buffer.Offset, shaderParams);
 
             TextureView.InsertImageBarrier(
                 gd.Api,
@@ -1251,16 +1250,12 @@ namespace Ryujinx.Graphics.Vulkan
                 0f,
                 1f);
 
-            Span<Rectangle<int>> scissors = stackalloc Rectangle<int>[1];
-
-            scissors[0] = new Rectangle<int>(0, 0, dst.Width, dst.Height);
-
             _pipeline.SetRenderTargetColorMasks(new uint[] { 0xf });
-            _pipeline.SetScissors(scissors);
+            _pipeline.SetScissors(stackalloc Rectangle<int>[] { new Rectangle<int>(0, 0, dst.Width, dst.Height) });
             _pipeline.SetViewports(viewports);
             _pipeline.SetPrimitiveTopology(PrimitiveTopology.TriangleStrip);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(bufferHandle, 0, ParamsBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, buffer.Range) });
 
             if (isDepthOrStencil)
             {
@@ -1269,13 +1264,7 @@ namespace Ryujinx.Graphics.Vulkan
                     var srcView = Create2DLayerView(src, srcLayer + z, 0);
                     var dstView = Create2DLayerView(dst, dstLayer + z, 0);
 
-                    _pipeline.SetRenderTarget(
-                        dstView.GetImageViewForAttachment(),
-                        (uint)dst.Width,
-                        (uint)dst.Height,
-                        (uint)samples,
-                        true,
-                        dst.VkFormat);
+                    _pipeline.SetRenderTarget(dstView, (uint)dst.Width, (uint)dst.Height);
 
                     CopyMSDraw(srcView, aspectFlags, fromMS: false);
 
@@ -1303,13 +1292,7 @@ namespace Ryujinx.Graphics.Vulkan
                     var dstView = Create2DLayerView(dst, dstLayer + z, 0);
 
                     _pipeline.SetTextureAndSamplerIdentitySwizzle(ShaderStage.Fragment, 0, srcView, null);
-                    _pipeline.SetRenderTarget(
-                        dstView.GetView(format).GetImageViewForAttachment(),
-                        (uint)dst.Width,
-                        (uint)dst.Height,
-                        (uint)samples,
-                        false,
-                        vkFormat);
+                    _pipeline.SetRenderTarget(dstView.GetView(format), (uint)dst.Width, (uint)dst.Height);
 
                     _pipeline.Draw(4, 1, 0, 0);
 
@@ -1324,8 +1307,6 @@ namespace Ryujinx.Graphics.Vulkan
                     }
                 }
             }
-
-            gd.BufferManager.Delete(bufferHandle);
 
             _pipeline.Finish(gd, cbs);
 
@@ -1448,9 +1429,9 @@ namespace Ryujinx.Graphics.Vulkan
             };
 
             var info = new TextureCreateInfo(
-                from.Info.Width,
-                from.Info.Height,
-                from.Info.Depth,
+                Math.Max(1, from.Info.Width >> level),
+                Math.Max(1, from.Info.Height >> level),
+                1,
                 1,
                 from.Info.Samples,
                 from.Info.BlockWidth,
@@ -1577,10 +1558,11 @@ namespace Ryujinx.Graphics.Vulkan
 
             pattern.OffsetIndex.CopyTo(shaderParams[..pattern.OffsetIndex.Length]);
 
-            var patternBufferHandle = gd.BufferManager.CreateWithHandle(gd, ParamsBufferSize, out var patternBuffer);
+            using var patternScoped = gd.BufferManager.ReserveOrCreate(gd, cbs, ParamsBufferSize);
+            var patternBuffer = patternScoped.Holder;
             var patternBufferAuto = patternBuffer.GetBuffer();
 
-            gd.BufferManager.SetData<int>(patternBufferHandle, 0, shaderParams);
+            patternBuffer.SetDataUnchecked<int>(patternScoped.Offset, shaderParams);
 
             _pipeline.SetCommandBuffer(cbs);
 
@@ -1596,7 +1578,8 @@ namespace Ryujinx.Graphics.Vulkan
                 indirectDataSize);
 
             _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, drawCountBufferAligned) });
-            _pipeline.SetStorageBuffers(1, new[] { srcIndirectBuffer.GetBuffer(), dstIndirectBuffer.GetBuffer(), patternBuffer.GetBuffer() });
+            _pipeline.SetStorageBuffers(1, new[] { srcIndirectBuffer.GetBuffer(), dstIndirectBuffer.GetBuffer() });
+            _pipeline.SetStorageBuffers(stackalloc[] { new BufferAssignment(3, patternScoped.Range) });
 
             _pipeline.SetProgram(_programConvertIndirectData);
             _pipeline.DispatchCompute(1, 1, 1);
@@ -1604,12 +1587,12 @@ namespace Ryujinx.Graphics.Vulkan
             BufferHolder.InsertBufferBarrier(
                 gd,
                 cbs.CommandBuffer,
-                patternBufferAuto.Get(cbs, ParamsIndirectDispatchOffset, ParamsIndirectDispatchSize).Value,
+                patternBufferAuto.Get(cbs, patternScoped.Offset + ParamsIndirectDispatchOffset, ParamsIndirectDispatchSize).Value,
                 AccessFlags.ShaderWriteBit,
                 AccessFlags.IndirectCommandReadBit,
                 PipelineStageFlags.ComputeShaderBit,
                 PipelineStageFlags.DrawIndirectBit,
-                ParamsIndirectDispatchOffset,
+                patternScoped.Offset + ParamsIndirectDispatchOffset,
                 ParamsIndirectDispatchSize);
 
             BufferHolder.InsertBufferBarrier(
@@ -1623,11 +1606,11 @@ namespace Ryujinx.Graphics.Vulkan
                 0,
                 convertedCount * outputIndexSize);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(patternBufferHandle, 0, ParamsBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(patternScoped.Handle, patternScoped.Offset, ParamsBufferSize)) });
             _pipeline.SetStorageBuffers(1, new[] { srcIndexBuffer.GetBuffer(), dstIndexBuffer.GetBuffer() });
 
             _pipeline.SetProgram(_programConvertIndexBuffer);
-            _pipeline.DispatchComputeIndirect(patternBufferAuto, ParamsIndirectDispatchOffset);
+            _pipeline.DispatchComputeIndirect(patternBufferAuto, patternScoped.Offset + ParamsIndirectDispatchOffset);
 
             BufferHolder.InsertBufferBarrier(
                 gd,
@@ -1639,8 +1622,6 @@ namespace Ryujinx.Graphics.Vulkan
                 PipelineStageFlags.AllCommandsBit,
                 0,
                 convertedCount * outputIndexSize);
-
-            gd.BufferManager.Delete(patternBufferHandle);
 
             _pipeline.Finish(gd, cbs);
         }
@@ -1687,13 +1668,13 @@ namespace Ryujinx.Graphics.Vulkan
             shaderParams[0] = pixelCount;
             shaderParams[1] = dstOffset;
 
-            var bufferHandle = gd.BufferManager.CreateWithHandle(gd, ParamsBufferSize);
+            using var buffer = gd.BufferManager.ReserveOrCreate(gd, cbs, ParamsBufferSize);
 
-            gd.BufferManager.SetData<int>(bufferHandle, 0, shaderParams);
+            buffer.Holder.SetDataUnchecked<int>(buffer.Offset, shaderParams);
 
             _pipeline.SetCommandBuffer(cbs);
 
-            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, new BufferRange(bufferHandle, 0, ParamsBufferSize)) });
+            _pipeline.SetUniformBuffers(stackalloc[] { new BufferAssignment(0, buffer.Range) });
 
             Span<Auto<DisposableBuffer>> sbRanges = new Auto<DisposableBuffer>[2];
 
@@ -1703,9 +1684,7 @@ namespace Ryujinx.Graphics.Vulkan
             _pipeline.SetStorageBuffers(1, sbRanges);
 
             _pipeline.SetProgram(_programConvertD32S8ToD24S8);
-            _pipeline.DispatchCompute(1, 1, 1);
-
-            gd.BufferManager.Delete(bufferHandle);
+            _pipeline.DispatchCompute(1 + inSize / ConvertElementsPerWorkgroup, 1, 1);
 
             _pipeline.Finish(gd, cbs);
 
@@ -1731,6 +1710,7 @@ namespace Ryujinx.Graphics.Vulkan
                 _programColorClearF.Dispose();
                 _programColorClearSI.Dispose();
                 _programColorClearUI.Dispose();
+                _programDepthStencilClear.Dispose();
                 _programStrideChange.Dispose();
                 _programConvertIndexBuffer.Dispose();
                 _programConvertIndirectData.Dispose();
